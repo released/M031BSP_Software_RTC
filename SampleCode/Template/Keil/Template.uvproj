@@ -1112,6 +1112,11 @@
               <FileType>1</FileType>
               <FilePath>..\main.c</FilePath>
             </File>
+            <File>
+              <FileName>EEPROM_Emulate.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\EEPROM_Emulate.c</FilePath>
+            </File>
           </Files>
         </Group>
       </Groups>

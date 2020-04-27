@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include "NuMicro.h"
-
+#include "EEPROM_Emulate.h"
 /*----------------------------------------------------*/
 
 /*----------------------------------------------------*/
@@ -21,6 +21,7 @@ typedef enum{
 	flag_100ms ,
 	
 	flag_RTC ,
+	flag_Record_Data ,
 	
 	flag_DEFAULT	
 }Flag_Index;
@@ -33,6 +34,24 @@ uint8_t BitFlag = 0;
 
 #define is_flag_set(idx)							(BitFlag_READ(ReadBit(idx)))
 #define set_flag(idx,en)							( (en == 1) ? (BitFlag_ON(ReadBit(idx))) : (BitFlag_OFF(ReadBit(idx))))
+
+#define HIBYTE(v1)              					((uint8_t)((v1)>>8))                      //v1 is UINT16
+#define LOBYTE(v1)             	 				((uint8_t)((v1)&0xFF))
+
+/*----------------------------------------------------*/
+#define DATA_FLASH_OFFSET  						(0x3C00)
+#define DATA_FLASH_AMOUNT						(16)
+#define DATA_FLASH_PAGE  						(2)
+
+#define DATA_FALSH_IDX_START					(1)
+#define DATA_FALSH_IDX_RTC_YEAR					(DATA_FALSH_IDX_START)					// 2 BYTE
+#define DATA_FALSH_IDX_RTC_MONTH				(DATA_FALSH_IDX_RTC_YEAR+2)
+#define DATA_FALSH_IDX_RTC_DAY					(DATA_FALSH_IDX_RTC_MONTH+1)
+#define DATA_FALSH_IDX_RTC_WEEKLY				(DATA_FALSH_IDX_RTC_DAY+1)
+
+#define DATA_FALSH_IDX_RTC_HOUR				(DATA_FALSH_IDX_RTC_WEEKLY+1)
+#define DATA_FALSH_IDX_RTC_MIN					(DATA_FALSH_IDX_RTC_HOUR+1)
+#define DATA_FALSH_IDX_RTC_SEC					(DATA_FALSH_IDX_RTC_MIN+1)
 
 /*----------------------------------------------------*/
 typedef enum{
@@ -49,18 +68,176 @@ typedef enum{
 uint16_t conter_1ms = 0;
 
 /*----------------------------------------------------*/
+#define	RTC_DEFAULT_YEAR		(2020)
+#define	RTC_DEFAULT_MONTH		(4)
+#define	RTC_DEFAULT_DAY		(27)
+#define	RTC_DEFAULT_WEEKLY		(1)
 
-unsigned int g_year=2015;
-unsigned char g_month=2;
-unsigned char g_day=28;
+#define	RTC_DEFAULT_HOUR		(13)
+#define	RTC_DEFAULT_MIN		(59)
+#define	RTC_DEFAULT_SEC			(30)
+
+unsigned int g_year = RTC_DEFAULT_YEAR;
+unsigned char g_month =RTC_DEFAULT_MONTH;
+unsigned char g_day =RTC_DEFAULT_DAY;
 unsigned char g_day_old;
-unsigned char g_weekly=2;
+unsigned char g_weekly = RTC_DEFAULT_WEEKLY;	//MONDAY : 1
 
-unsigned char hour=23;
-unsigned char min=59;
-unsigned char  sec=30;
+unsigned char hour = RTC_DEFAULT_HOUR;
+unsigned char min = RTC_DEFAULT_MIN;
+unsigned char  sec = RTC_DEFAULT_SEC;
 
 /*----------------------------------------------------*/
+int IsDebugFifoEmpty(void);
+
+void GetDateTimeFromFlash(void)
+{
+	uint8_t		rtc_temp = 0;
+	uint8_t 	rtc_msb = 0;
+
+	Read_Data(DATA_FALSH_IDX_RTC_YEAR, &rtc_temp);
+	Read_Data(DATA_FALSH_IDX_RTC_YEAR+1, &rtc_msb);
+	g_year = rtc_msb << 8 | rtc_temp;
+	if ((rtc_msb == 0xFF) || (rtc_temp == 0xFF))
+	{
+		g_year = RTC_DEFAULT_YEAR;
+	}
+
+	Read_Data(DATA_FALSH_IDX_RTC_MONTH, &rtc_temp);
+	g_month = rtc_temp;
+	if (g_month == 0xFF)
+	{
+		g_month = RTC_DEFAULT_MONTH;
+	}
+
+	Read_Data(DATA_FALSH_IDX_RTC_DAY, &rtc_temp);
+	g_day = rtc_temp;
+	if (g_day == 0xFF)
+	{
+		g_day = RTC_DEFAULT_DAY;
+	}	
+
+	Read_Data(DATA_FALSH_IDX_RTC_WEEKLY, &rtc_temp);
+	g_weekly = rtc_temp;
+	if (g_weekly == 0xFF)
+	{
+		g_weekly = RTC_DEFAULT_WEEKLY;
+	}
+
+
+	Read_Data(DATA_FALSH_IDX_RTC_HOUR, &rtc_temp);
+	hour = rtc_temp;
+	if (hour == 0xFF)
+	{
+		hour = RTC_DEFAULT_HOUR;
+	}
+	
+	Read_Data(DATA_FALSH_IDX_RTC_MIN, &rtc_temp);
+	min = rtc_temp;
+	if (min == 0xFF)
+	{
+		min = RTC_DEFAULT_MIN;
+	}
+
+	Read_Data(DATA_FALSH_IDX_RTC_SEC, &rtc_temp);
+	sec = rtc_temp;	
+	if (sec == 0xFF)
+	{
+		sec = RTC_DEFAULT_SEC;
+	}
+	
+}
+
+void SaveDateTimeToFlash(void)
+{
+	if (is_flag_set(flag_Record_Data))
+	{
+		set_flag(flag_Record_Data , DISABLE);
+
+		Write_Data(DATA_FALSH_IDX_RTC_YEAR , LOBYTE(g_year));
+		Write_Data(DATA_FALSH_IDX_RTC_YEAR+1 , HIBYTE(g_year));
+
+		Write_Data(DATA_FALSH_IDX_RTC_MONTH , g_month);
+		Write_Data(DATA_FALSH_IDX_RTC_DAY , g_day);
+		Write_Data(DATA_FALSH_IDX_RTC_WEEKLY , g_weekly);
+		
+		Write_Data(DATA_FALSH_IDX_RTC_HOUR , hour);
+		Write_Data(DATA_FALSH_IDX_RTC_MIN , min);
+		Write_Data(DATA_FALSH_IDX_RTC_SEC , sec);	
+		
+		/* Disable FMC ISP function */
+		FMC_Close();
+
+		/* Lock protected registers */
+		SYS_LockReg();
+
+		printf(" \r\n%s ! \r\n\r\n" , __FUNCTION__);
+	}
+}
+
+int set_data_flash_base(uint32_t u32DFBA)
+{
+    uint32_t   au32Config[2];
+	
+    /* Read User Configuration 0 & 1 */
+    if (FMC_ReadConfig(au32Config, 2) < 0)
+    {
+        printf("\nRead User Config failed!\n");
+        return -1;
+    }
+
+    /* Check if Data Flash is enabled (CONFIG0[0]) and is expected address (CONFIG1) */
+    if ((!(au32Config[0] & 0x1)) && (au32Config[1] == u32DFBA))
+        return 0;
+
+    FMC_ENABLE_CFG_UPDATE();
+
+    au32Config[0] &= ~0x1;         /* CONFIG0[0] = 0 (Enabled) / 1 (Disabled) */
+    au32Config[1] = u32DFBA;
+
+    /* Update User Configuration settings. */
+    if (FMC_WriteConfig(au32Config, 2) < 0)
+        return -1;
+
+    FMC_ReadConfig(au32Config, 2);
+
+    /* Check if Data Flash is enabled (CONFIG0[0]) and is expected address (CONFIG1) */
+    if (((au32Config[0] & 0x01) == 1) || (au32Config[1] != u32DFBA))
+    {
+        printf("Error: Program Config Failed!\n");
+        /* Disable FMC ISP function */
+        FMC_Close();
+        SYS_LockReg();
+        return -1;
+    }
+
+
+    printf("\nSet Data Flash base as 0x%x.\n", u32DFBA);
+
+    /* To check if all the debug messages are finished */
+    while(!IsDebugFifoEmpty());
+
+    /* Perform chip reset to make new User Config take effect */
+    SYS->IPRST0 = SYS_IPRST0_CHIPRST_Msk;
+    return 0;
+}
+
+void Emulate_EEPROM(void)
+{
+    SYS_UnlockReg();
+
+    /* Enable FMC ISP function */
+    FMC_Open();
+
+    if (set_data_flash_base(DATA_FLASH_OFFSET) < 0)
+    {
+        printf("Failed to set Data Flash base address!\r\n");
+    }
+
+	/* Test Init_EEPROM() */
+	Init_EEPROM(DATA_FLASH_AMOUNT, DATA_FLASH_PAGE);
+	Search_Valid_Page();	
+}
 
 int isLeapYear(int year) 
 {
@@ -72,8 +249,16 @@ void SoftwareRTC(void)
 	if (!is_flag_set(flag_RTC))	//(flag_RTC==0)
 		return;
 	sec++;
+
+	if ((sec%10) == 0 )	//record data per 10 sec	
+	{
+		set_flag(flag_Record_Data , ENABLE);	
+	}
+	
 	if(sec==60)
 	{
+//		set_flag(flag_Record_Data , ENABLE);	//record data per 60 sec
+	
 		sec=0;			
 		min++;			
 	}
@@ -316,14 +501,15 @@ int main()
 	TIMER2_Init();
 
 	TIMER3_Init();
+
+	Emulate_EEPROM();
+	GetDateTimeFromFlash();
 	
     /* Got no where to go, just loop forever */
     while(1)
-    {
-
-		
+    {		
 		RTC_Process();
-		
+		SaveDateTimeToFlash();
     }
 }
 
